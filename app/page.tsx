@@ -1,65 +1,1012 @@
+"use client";
+
+import { Fragment, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
+import type { User } from "firebase/auth";
+import { collection, getDocs, limit, query } from "firebase/firestore";
+import {
+  getRegistrations,
+  updateApprovalStatus
+} from "../src/services/registrationService";
+import {
+  listenToAuthState,
+  signInWithGoogle,
+  signOutUser
+} from "../src/services/authService";
+import { db } from "../src/lib/firebase";
+import styles from "./page.module.css";
+
+const READ_ONLY_MODE = false;
+type StatusFilter = "all" | "pending" | "approved" | "hold";
+type PendingAction = {
+  id: string;
+  teamName: string;
+  status: "approved" | "hold";
+};
 
 export default function Home() {
-  return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+  const [registrations, setRegistrations] = useState<
+    Array<{
+      id: string;
+      teamName: string;
+      trackChoice: string;
+      numberOfMembers: number;
+      members?: Array<{
+        name?: string;
+        memberName?: string;
+        registerNumber?: string;
+        registrationNumber?: string;
+        email?: string;
+      }>;
+      leaderEmail: string;
+      paymentProofUrl: string;
+      submittedAt?: unknown;
+      approvalStatus: string;
+    }>
+  >([]);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [permissionStatus, setPermissionStatus] = useState<
+    "checking" | "authorized" | "denied"
+  >("checking");
+  const [registrationsLoading, setRegistrationsLoading] = useState(false);
+  const [currentUser, setCurrentUser] = useState<{
+    uid: string;
+    displayName?: string | null;
+    email?: string | null;
+    photoURL?: string | null;
+  } | null>(null);
+  const [updatingId, setUpdatingId] = useState<string | null>(null);
+  const [selectedProofUrl, setSelectedProofUrl] = useState<string | null>(null);
+  const [selectedProofRegistrationId, setSelectedProofRegistrationId] = useState<
+    string | null
+  >(null);
+  const [activeFilter, setActiveFilter] = useState<StatusFilter>("pending");
+  const [searchTerm, setSearchTerm] = useState("");
+  const [selectedTrack, setSelectedTrack] = useState("all");
+  const [expandedRegistrationId, setExpandedRegistrationId] = useState<
+    string | null
+  >(null);
+  const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+
+  const getNormalizedStatus = (status: string | undefined) => {
+    if (status === "approved" || status === "hold" || status === "pending") {
+      return status;
+    }
+
+    return "pending";
+  };
+
+  const formatStatusLabel = (status: string) =>
+    status.charAt(0).toUpperCase() + status.slice(1);
+
+  const getTrackPill = (trackChoice: string | undefined) => {
+    const value = trackChoice ?? "";
+
+    if (value === "Agentic AI & Workforce Augmentation") {
+      return { label: "Agentic AI", className: styles.trackAgentic };
+    }
+
+    if (value === "Inclusive FinTech & Financial Wellness") {
+      return { label: "Inclusive FinTech", className: styles.trackFintech };
+    }
+
+    return { label: value || "Other", className: styles.trackOther };
+  };
+
+  const formatSubmittedDate = (submittedAt: unknown) => {
+    if (
+      submittedAt &&
+      typeof submittedAt === "object" &&
+      "seconds" in submittedAt &&
+      typeof (submittedAt as { seconds: unknown }).seconds === "number"
+    ) {
+      const date = new Date((submittedAt as { seconds: number }).seconds * 1000);
+      return date.toLocaleDateString();
+    }
+
+    return "";
+  };
+
+  const getMemberName = (member: {
+    name?: string;
+    memberName?: string;
+  }) => member.name ?? member.memberName ?? "Unknown Member";
+
+  const getMemberRegisterNumber = (member: {
+    registerNumber?: string;
+    registrationNumber?: string;
+  }) => member.registerNumber ?? member.registrationNumber ?? "N/A";
+
+  const getMemberInitials = (memberName: string) => {
+    const parts = memberName.trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) {
+      return "NA";
+    }
+
+    const initials = parts
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase() ?? "")
+      .join("");
+
+    return initials || "NA";
+  };
+
+  const fetchRegistrations = async () => {
+    const data = await getRegistrations();
+    setRegistrations(data);
+  };
+
+  useEffect(() => {
+    const unsubscribe = listenToAuthState((user: User | null) => {
+      setCurrentUser(
+        user
+          ? {
+              uid: user.uid,
+              displayName: user.displayName,
+              email: user.email,
+              photoURL: user.photoURL
+            }
+          : null
+      );
+
+      if (user) {
+        setPermissionStatus("checking");
+      } else {
+        setPermissionStatus("checking");
+        setRegistrations([]);
+      }
+
+      setAuthLoading(false);
+    });
+
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    if (!currentUser) {
+      return;
+    }
+
+    const checkPermission = async () => {
+      try {
+        const permissionProbe = query(collection(db, "registrations"), limit(1));
+        await getDocs(permissionProbe);
+        setPermissionStatus("authorized");
+      } catch (error) {
+        const errorCode =
+          typeof error === "object" &&
+          error !== null &&
+          "code" in error &&
+          typeof error.code === "string"
+            ? error.code
+            : "";
+
+        if (errorCode === "permission-denied") {
+          setPermissionStatus("denied");
+          setRegistrations([]);
+        } else {
+          throw error;
+        }
+      }
+    };
+
+    void checkPermission();
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (!currentUser || permissionStatus !== "authorized") {
+      return;
+    }
+
+    const loadRegistrations = async () => {
+      setRegistrationsLoading(true);
+      await fetchRegistrations();
+      setRegistrationsLoading(false);
+    };
+
+    void loadRegistrations();
+  }, [currentUser, permissionStatus]);
+
+  const handleStatusUpdate = async (id: string, status: string) => {
+    setUpdatingId(id);
+    await updateApprovalStatus(id, status);
+    await fetchRegistrations();
+    console.log("Status updated safely");
+    setUpdatingId(null);
+  };
+
+  const promptStatusUpdate = (
+    id: string,
+    teamName: string,
+    status: "approved" | "hold"
+  ) => {
+    setPendingAction({ id, teamName, status });
+  };
+
+  const confirmStatusUpdate = async () => {
+    if (!pendingAction) {
+      return;
+    }
+
+    await handleStatusUpdate(pendingAction.id, pendingAction.status);
+    setPendingAction(null);
+  };
+
+  const counts = useMemo(
+    () => ({
+      all: registrations.length,
+      pending: registrations.filter(
+        (registration) => getNormalizedStatus(registration.approvalStatus) === "pending"
+      ).length,
+      approved: registrations.filter(
+        (registration) => getNormalizedStatus(registration.approvalStatus) === "approved"
+      ).length,
+      hold: registrations.filter(
+        (registration) => getNormalizedStatus(registration.approvalStatus) === "hold"
+      ).length
+    }),
+    [registrations]
+  );
+
+  const trackOptions = useMemo(() => {
+    const uniqueTracks = Array.from(
+      new Set(
+        registrations
+          .map((registration) => registration.trackChoice)
+          .filter((trackChoice) => typeof trackChoice === "string" && trackChoice.trim())
+      )
+    ) as string[];
+
+    return uniqueTracks.sort((a, b) => a.localeCompare(b));
+  }, [registrations]);
+
+  const filteredRegistrations = useMemo(
+    () =>
+      registrations.filter((registration) => {
+        const normalizedStatus = getNormalizedStatus(registration.approvalStatus);
+        const team = (registration.teamName ?? "").toLowerCase();
+        const leaderEmail = (registration.leaderEmail ?? "").toLowerCase();
+        const search = searchTerm.trim().toLowerCase();
+        const matchesSearch =
+          search.length === 0 || team.includes(search) || leaderEmail.includes(search);
+        const matchesTrack =
+          selectedTrack === "all" || registration.trackChoice === selectedTrack;
+        const matchesStatus =
+          activeFilter === "all" || normalizedStatus === activeFilter;
+
+        return matchesSearch && matchesTrack && matchesStatus;
+      }),
+    [activeFilter, registrations, searchTerm, selectedTrack]
+  );
+
+  const selectedProofRegistration =
+    selectedProofRegistrationId !== null
+      ? registrations.find(
+          (registration) => registration.id === selectedProofRegistrationId
+        ) ?? null
+      : null;
+
+  if (authLoading) {
+    return (
+      <div className={styles.authGate}>
+        <div className={styles.authChecking}>
+          <span className={styles.authSpinner} aria-hidden="true" />
+          <p className={styles.authCheckingText}>Checking authentication...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return (
+      <div className={styles.authGate}>
+        <div className={styles.authCard}>
+          <h1 className={styles.authTitle}>Organizer Dashboard</h1>
+          <button
+            type="button"
+            className={styles.authButton}
+            onClick={() => void signInWithGoogle()}
+          >
+            Sign in with Google
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (permissionStatus === "checking") {
+    return (
+      <div className={styles.authGate}>
+        <div className={styles.authChecking}>
+          <span className={styles.authSpinner} aria-hidden="true" />
+          <p className={styles.authCheckingText}>Checking permissions...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (permissionStatus === "denied") {
+    return (
+      <div className={styles.authGate}>
+        <div className={styles.authCard}>
+          <div className={styles.deniedIcon} aria-hidden="true">
+            🔒
+          </div>
+          <h1 className={styles.authTitle}>Access Restricted</h1>
+          <p className={styles.authMessage}>
+            You do not have permission to access this organizer dashboard.
           </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+          <p className={styles.authHint}>
+            If you believe this is an error contact event admin.
+          </p>
+          <button
+            type="button"
+            className={styles.deniedLogoutButton}
+            onClick={() => void signOutUser()}
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+            Logout
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (permissionStatus !== "authorized") {
+    return (
+      <div className={styles.authGate}>
+        <div className={styles.authChecking}>
+          <span className={styles.authSpinner} aria-hidden="true" />
+          <p className={styles.authCheckingText}>Checking permissions...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (registrationsLoading) {
+    return <div>Loading registrations...</div>;
+  }
+
+  if (!Array.isArray(registrations) || registrations.length === 0) {
+    return <div>No registrations found</div>;
+  }
+
+  return (
+    <div className={styles.container}>
+      <div className={styles.topbar}>
+        <div className={styles.topbarInner}>
+          <div className={styles.topbarBrand}>
+            <span className={styles.brandDot} />
+            <span className={styles.brandText}>Hackathon Admin</span>
+          </div>
+
+          <div className={styles.topbarStats}>
+            <span className={`${styles.statPill} ${styles.statTotal}`}>
+              <span className={`${styles.statDot} ${styles.dotTotal}`} />
+              {counts.all} Total
+            </span>
+            <span className={`${styles.statPill} ${styles.statPending}`}>
+              <span className={`${styles.statDot} ${styles.dotPending}`} />
+              {counts.pending} Pending
+            </span>
+            <span className={`${styles.statPill} ${styles.statApproved}`}>
+              <span className={`${styles.statDot} ${styles.dotApproved}`} />
+              {counts.approved} Approved
+            </span>
+            <span className={`${styles.statPill} ${styles.statHold}`}>
+              <span className={`${styles.statDot} ${styles.dotHold}`} />
+              {counts.hold} Hold
+            </span>
+          </div>
+
+          <div className={styles.topbarRight}>
+            {currentUser.photoURL ? (
+              <Image
+                src={currentUser.photoURL}
+                alt="User profile"
+                className={styles.userPhoto}
+                width={28}
+                height={28}
+                unoptimized
+              />
+            ) : (
+              <div className={styles.userPhotoFallback}>
+                {(currentUser.displayName ?? currentUser.email ?? "U")
+                  .charAt(0)
+                  .toUpperCase()}
+              </div>
+            )}
+            <div className={styles.userMeta}>
+              <div className={styles.userName}>
+                {currentUser.displayName ?? "Organizer"}
+              </div>
+              <div className={styles.userEmail}>{currentUser.email ?? "No email"}</div>
+            </div>
+            <button
+              type="button"
+              className={styles.logoutButton}
+              onClick={() => void signOutUser()}
+            >
+              Logout
+            </button>
+            <button
+              type="button"
+              className={styles.refreshButton}
+              onClick={() => void fetchRegistrations()}
+            >
+              Refresh
+            </button>
+          </div>
+        </div>
+      </div>
+      <div className={styles.secondaryBar}>
+        <div className={styles.secondaryInner}>
+          <div className={styles.searchWrap}>
+            <svg
+              className={styles.searchIcon}
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden="true"
+            >
+              <path
+                d="M21 21L16.65 16.65M18 11C18 14.866 14.866 18 11 18C7.13401 18 4 14.866 4 11C4 7.13401 7.13401 4 11 4C14.866 4 18 7.13401 18 11Z"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            <input
+              type="text"
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
+              placeholder="Search team or leader email…"
+              className={styles.searchInput}
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+          </div>
+
+          <select
+            value={selectedTrack}
+            onChange={(event) => setSelectedTrack(event.target.value)}
+            className={styles.trackSelect}
           >
-            Documentation
-          </a>
+            <option value="all">All tracks</option>
+            {trackOptions.map((track) => (
+              <option key={track} value={track}>
+                {track}
+              </option>
+            ))}
+          </select>
+
+          <div className={styles.segmentedControl}>
+            <button
+              type="button"
+              onClick={() => setActiveFilter("all")}
+              className={`${styles.segmentButton} ${
+                activeFilter === "all" ? styles.segmentActive : styles.segmentInactive
+              }`}
+            >
+              All ({counts.all})
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveFilter("pending")}
+              className={`${styles.segmentButton} ${
+                activeFilter === "pending" ? styles.segmentActive : styles.segmentInactive
+              }`}
+            >
+              Pending ({counts.pending})
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveFilter("approved")}
+              className={`${styles.segmentButton} ${
+                activeFilter === "approved" ? styles.segmentActive : styles.segmentInactive
+              }`}
+            >
+              Approved ({counts.approved})
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveFilter("hold")}
+              className={`${styles.segmentButton} ${
+                activeFilter === "hold" ? styles.segmentActive : styles.segmentInactive
+              }`}
+            >
+              Hold ({counts.hold})
+            </button>
+          </div>
         </div>
-      </main>
+      </div>
+      <h1 className={styles.title}>Registrations Dashboard</h1>
+      <div className={styles.tableWrap}>
+        <table className={styles.table}>
+          <thead>
+            <tr>
+              <th className={`${styles.headerCell} ${styles.teamHeader}`}>Team</th>
+              <th className={`${styles.headerCell} ${styles.trackHeader}`}>Track</th>
+              <th className={`${styles.headerCell} ${styles.membersHeader}`}>Members</th>
+              <th className={`${styles.headerCell} ${styles.emailHeader}`}>Leader Email</th>
+              <th className={`${styles.headerCell} ${styles.paymentHeader}`}>Payment</th>
+              <th className={`${styles.headerCell} ${styles.statusHeader}`}>Status</th>
+              <th className={`${styles.headerCell} ${styles.actionsHeader}`}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filteredRegistrations.map((registration) => (
+              <Fragment key={registration.id}>
+               <tr className={styles.row}>
+                 <td className={`${styles.cell} ${styles.teamCell}`}>
+                   <div className={styles.teamName}>{registration.teamName}</div>
+                    {formatSubmittedDate(registration.submittedAt) ? (
+                      <div className={styles.submittedDate}>
+                        {formatSubmittedDate(registration.submittedAt)}
+                      </div>
+                    ) : null}
+                 </td>
+                 <td className={`${styles.cell} ${styles.trackCell}`}>
+                   <span
+                     className={`${styles.trackPill} ${
+                       getTrackPill(registration.trackChoice).className
+                     }`}
+                   >
+                     {getTrackPill(registration.trackChoice).label}
+                   </span>
+                 </td>
+                 <td className={`${styles.cell} ${styles.membersCell}`}>
+                   {registration.numberOfMembers}
+                 </td>
+                 <td className={`${styles.cell} ${styles.emailCell} font-mono`}>
+                   {registration.leaderEmail}
+                 </td>
+                 <td className={`${styles.cell} ${styles.paymentCell}`}>
+                   {registration.paymentProofUrl ? (
+                     <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedProofUrl(registration.paymentProofUrl);
+                        setSelectedProofRegistrationId(registration.id);
+                       }}
+                       className={styles.proofButton}
+                      >
+                        View
+                      </button>
+                   ) : (
+                     "N/A"
+                   )}
+                 </td>
+                  <td className={`${styles.cell} ${styles.statusCell}`}>
+                    <span
+                      className={`${styles.statusBadge} ${
+                        getNormalizedStatus(registration.approvalStatus) === "approved"
+                          ? styles.statusApproved
+                          : getNormalizedStatus(registration.approvalStatus) === "hold"
+                            ? styles.statusHold
+                            : styles.statusPending
+                      }`}
+                    >
+                      {formatStatusLabel(
+                        getNormalizedStatus(registration.approvalStatus)
+                      )}
+                    </span>
+                  </td>
+                  <td className={`${styles.cell} ${styles.actionsCell}`}>
+                    <div className={styles.actionsRow}>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          promptStatusUpdate(registration.id, registration.teamName, "approved")
+                        }
+                        disabled={
+                          READ_ONLY_MODE ||
+                          updatingId === registration.id ||
+                          getNormalizedStatus(registration.approvalStatus) === "approved"
+                        }
+                        className={styles.approveButton}
+                      >
+                        Approve
+                      </button>
+                     <button
+                       type="button"
+                        onClick={() =>
+                          promptStatusUpdate(registration.id, registration.teamName, "hold")
+                        }
+                        disabled={
+                          READ_ONLY_MODE ||
+                          updatingId === registration.id ||
+                          getNormalizedStatus(registration.approvalStatus) === "hold"
+                        }
+                        className={styles.holdButton}
+                      >
+                        Hold
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedRegistrationId((currentId) =>
+                            currentId === registration.id ? null : registration.id
+                          )
+                        }
+                        className={styles.membersButton}
+                      >
+                        {expandedRegistrationId === registration.id
+                          ? "Members (Hide)"
+                          : "Members"}
+                      </button>
+                   </div>
+                 </td>
+              </tr>
+              {expandedRegistrationId === registration.id ? (
+                 <tr>
+                   <td className={styles.expandedCell} colSpan={7}>
+                     <div className={styles.membersPanel}>
+                       <div className={styles.membersPanelLabel}>
+                         TEAM MEMBERS —{" "}
+                         {Array.isArray(registration.members)
+                           ? registration.members.length
+                           : 0}
+                       </div>
+                       {Array.isArray(registration.members) &&
+                       registration.members.length > 0 ? (
+                         <div className={styles.membersCards}>
+                           {registration.members.map((member, index) => {
+                             const memberName = getMemberName(member);
+                             const registerNumber = getMemberRegisterNumber(member);
+                             const memberEmail = member.email ?? "";
+                             const isLeader =
+                               memberEmail.toLowerCase() ===
+                               (registration.leaderEmail ?? "").toLowerCase();
+
+                             return (
+                               <div
+                                 className={styles.memberCard}
+                                 key={`${registration.id}-member-${index}`}
+                               >
+                                 <div className={styles.memberAvatar}>
+                                   {getMemberInitials(memberName)}
+                                 </div>
+                                 <div className={styles.memberMeta}>
+                                   <div className={styles.memberName}>{memberName}</div>
+                                   <div className={`${styles.memberRegister} font-mono`}>
+                                     {registerNumber}
+                                   </div>
+                                 </div>
+                                 {isLeader ? (
+                                   <span className={styles.leaderBadge}>Leader</span>
+                                 ) : null}
+                               </div>
+                             );
+                           })}
+                         </div>
+                       ) : (
+                         <div>No member details found.</div>
+                       )}
+                     </div>
+                   </td>
+                 </tr>
+               ) : null}
+              </Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className={styles.mobileCards}>
+        {filteredRegistrations.map((registration) => (
+          <div key={`mobile-${registration.id}`} className={styles.mobileCard}>
+            <div className={styles.mobileCardTop}>
+              <div>
+                <div className={styles.teamName}>{registration.teamName}</div>
+                {formatSubmittedDate(registration.submittedAt) ? (
+                  <div className={styles.submittedDate}>
+                    {formatSubmittedDate(registration.submittedAt)}
+                  </div>
+                ) : null}
+              </div>
+              <span
+                className={`${styles.statusBadge} ${
+                  getNormalizedStatus(registration.approvalStatus) === "approved"
+                    ? styles.statusApproved
+                    : getNormalizedStatus(registration.approvalStatus) === "hold"
+                      ? styles.statusHold
+                      : styles.statusPending
+                }`}
+              >
+                {formatStatusLabel(getNormalizedStatus(registration.approvalStatus))}
+              </span>
+            </div>
+
+            <div className={styles.mobileMetaRow}>
+              <span
+                className={`${styles.trackPill} ${
+                  getTrackPill(registration.trackChoice).className
+                }`}
+              >
+                {getTrackPill(registration.trackChoice).label}
+              </span>
+              <span className={styles.mobileMembersMeta}>
+                {registration.numberOfMembers} members
+              </span>
+            </div>
+
+            <div className={`${styles.mobileEmail} font-mono`}>
+              {registration.leaderEmail}
+            </div>
+
+            <div className={styles.mobileActions}>
+              {registration.paymentProofUrl ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedProofUrl(registration.paymentProofUrl);
+                    setSelectedProofRegistrationId(registration.id);
+                  }}
+                  className={styles.proofButton}
+                >
+                  View
+                </button>
+              ) : (
+                <span className={styles.mobileMuted}>No proof</span>
+              )}
+              <button
+                type="button"
+                onClick={() =>
+                  promptStatusUpdate(registration.id, registration.teamName, "approved")
+                }
+                disabled={
+                  READ_ONLY_MODE ||
+                  updatingId === registration.id ||
+                  getNormalizedStatus(registration.approvalStatus) === "approved"
+                }
+                className={styles.approveButton}
+              >
+                Approve
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  promptStatusUpdate(registration.id, registration.teamName, "hold")
+                }
+                disabled={
+                  READ_ONLY_MODE ||
+                  updatingId === registration.id ||
+                  getNormalizedStatus(registration.approvalStatus) === "hold"
+                }
+                className={styles.holdButton}
+              >
+                Hold
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setExpandedRegistrationId((currentId) =>
+                    currentId === registration.id ? null : registration.id
+                  )
+                }
+                className={styles.membersButton}
+              >
+                {expandedRegistrationId === registration.id ? "Members (Hide)" : "Members"}
+              </button>
+            </div>
+
+            {expandedRegistrationId === registration.id ? (
+              <div className={styles.mobileMembersWrap}>
+                <div className={styles.membersPanelLabel}>
+                  TEAM MEMBERS — {Array.isArray(registration.members) ? registration.members.length : 0}
+                </div>
+                {Array.isArray(registration.members) && registration.members.length > 0 ? (
+                  <div className={styles.membersCards}>
+                    {registration.members.map((member, index) => {
+                      const memberName = getMemberName(member);
+                      const registerNumber = getMemberRegisterNumber(member);
+                      const memberEmail = member.email ?? "";
+                      const isLeader =
+                        memberEmail.toLowerCase() ===
+                        (registration.leaderEmail ?? "").toLowerCase();
+
+                      return (
+                        <div className={styles.memberCard} key={`mobile-${registration.id}-${index}`}>
+                          <div className={styles.memberAvatar}>{getMemberInitials(memberName)}</div>
+                          <div className={styles.memberMeta}>
+                            <div className={styles.memberName}>{memberName}</div>
+                            <div className={`${styles.memberRegister} font-mono`}>
+                              {registerNumber}
+                            </div>
+                          </div>
+                          {isLeader ? <span className={styles.leaderBadge}>Leader</span> : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className={styles.mobileMuted}>No member details found.</div>
+                )}
+              </div>
+            ) : null}
+          </div>
+        ))}
+      </div>
+      {selectedProofUrl ? (
+        <div
+          className={styles.modalOverlay}
+          onClick={() => {
+            setSelectedProofUrl(null);
+            setSelectedProofRegistrationId(null);
+          }}
+          role="presentation"
+        >
+          <div
+            className={styles.modalContent}
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+          >
+            <div className={styles.modalHeader}>
+              <div className={styles.modalHeaderMeta}>
+                <div className={styles.modalTeamName}>
+                  {selectedProofRegistration?.teamName ?? "Team"}
+                </div>
+                <div className={styles.modalSubMeta}>
+                  Leader: {selectedProofRegistration?.leaderEmail ?? "N/A"} ·{" "}
+                  {selectedProofRegistration?.numberOfMembers ?? 0} members ·{" "}
+                  {selectedProofRegistration?.trackChoice ?? "N/A"}
+                </div>
+              </div>
+              <button
+                type="button"
+                className={styles.modalCloseButton}
+                onClick={() => {
+                  setSelectedProofUrl(null);
+                  setSelectedProofRegistrationId(null);
+                }}
+                aria-label="Close proof modal"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className={styles.modalImageArea}>
+              {/\.pdf(\?|#|$)/i.test(selectedProofUrl) ? (
+                <iframe
+                  src={selectedProofUrl}
+                  title="Payment proof PDF"
+                  className={styles.modalPdf}
+                />
+              ) : (
+                <Image
+                  src={selectedProofUrl}
+                  alt="Payment proof"
+                  className={styles.modalImage}
+                  width={520}
+                  height={400}
+                  unoptimized
+                />
+              )}
+              <span className={styles.zoomHint}>Click to zoom</span>
+            </div>
+
+            <div className={styles.modalFooter}>
+              <div>
+                {selectedProofRegistration ? (
+                  <span
+                    className={`${styles.statusBadge} ${
+                      getNormalizedStatus(selectedProofRegistration.approvalStatus) ===
+                      "approved"
+                        ? styles.statusApproved
+                        : getNormalizedStatus(selectedProofRegistration.approvalStatus) ===
+                            "hold"
+                          ? styles.statusHold
+                          : styles.statusPending
+                    }`}
+                  >
+                    {formatStatusLabel(
+                      getNormalizedStatus(selectedProofRegistration.approvalStatus)
+                    )}
+                  </span>
+                ) : null}
+              </div>
+              <div className={styles.modalFooterActions}>
+                <button
+                  type="button"
+                  onClick={() =>
+                    selectedProofRegistration &&
+                    promptStatusUpdate(
+                      selectedProofRegistration.id,
+                      selectedProofRegistration.teamName,
+                      "hold"
+                    )
+                  }
+                  disabled={
+                    !selectedProofRegistration ||
+                    READ_ONLY_MODE ||
+                    updatingId === selectedProofRegistration?.id
+                  }
+                  className={styles.modalHoldButton}
+                >
+                  Mark Hold
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    selectedProofRegistration &&
+                    promptStatusUpdate(
+                      selectedProofRegistration.id,
+                      selectedProofRegistration.teamName,
+                      "approved"
+                    )
+                  }
+                  disabled={
+                    !selectedProofRegistration ||
+                    READ_ONLY_MODE ||
+                    updatingId === selectedProofRegistration?.id
+                  }
+                  className={styles.modalApproveButton}
+                >
+                  Approve
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {pendingAction ? (
+        <div
+          className={styles.confirmOverlay}
+          role="presentation"
+          onClick={() => setPendingAction(null)}
+        >
+          <div
+            className={styles.confirmDialog}
+            role="dialog"
+            aria-modal="true"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div
+              className={`${styles.confirmIconBox} ${
+                pendingAction.status === "approved"
+                  ? styles.confirmIconApprove
+                  : styles.confirmIconHold
+              }`}
+            >
+              {pendingAction.status === "approved" ? "A" : "H"}
+            </div>
+            <p className={styles.confirmTitle}>
+              {pendingAction.status === "approved"
+                ? `Approve "${pendingAction.teamName}"?`
+                : `Hold "${pendingAction.teamName}"?`}
+            </p>
+            <p className={styles.confirmDescription}>
+              {pendingAction.status === "approved"
+                ? "This will mark the team as approved and update their status. You can change this later."
+                : "This will flag the team for review. Their payment may need re-verification."}
+            </p>
+            <div className={styles.confirmButtons}>
+              <button
+                type="button"
+                onClick={() => setPendingAction(null)}
+                className={styles.confirmCancelButton}
+                disabled={updatingId === pendingAction.id}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmStatusUpdate}
+                className={`${styles.confirmYesButton} ${
+                  pendingAction.status === "approved"
+                    ? styles.confirmYesApprove
+                    : styles.confirmYesHold
+                }`}
+                disabled={updatingId === pendingAction.id}
+              >
+                {pendingAction.status === "approved"
+                  ? "Yes, approve"
+                  : "Yes, mark hold"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
